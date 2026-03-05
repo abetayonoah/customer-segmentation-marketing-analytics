@@ -1,0 +1,486 @@
+---
+title: "GROUP 4 - DAMO 520 - Marketing Analytics - Graded Assignment 2"
+author: "Tayo Noah Abe, Nihal Vellaramkallingal Sulaiman, Olamide Ibukun"
+date: "2025-08-08"
+output: html_document
+---
+
+# STEP Zero — Set up
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# install.packages(c("readxl","dplyr","ggplot2","stringr","tidyr","lmtest","car","broom","readr"))
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(tidyr)
+library(lmtest)  # bptest
+library(car)     # vif
+library(broom)   # tidy model summaries
+library(readr)   # write_csv
+library(ggplot2)
+library(viridisLite)   # palettes
+library(viridis)       # scale_*_viridis* helpers
+library(tibble)
+```
+
+
+# Step 1
+We read the file without skipping any rows so we can use the first data row (full question text) to reliably find the right columns. We then drop that label row.
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# Step 1 – Load data & capture the label row
+df_raw <- read_excel("Purchasing_data.xlsx", sheet = "Sheet1", col_names = TRUE)
+
+# First row contains full survey questions / labels
+labels <- as.character(df_raw[1, ])
+purchasing_clean   <- df_raw[-1, ]
+
+dim(df_raw); dim(purchasing_clean)  # raw vs. after dropping label row
+
+```
+```{r}
+# Look at first rows and column names
+head(purchasing_clean)
+colnames(purchasing_clean)
+
+```
+
+# Step 2 – Robust column finders (by label text)
+These patterns helps in matching question text in the label row, so it works even if coded names (Q01_1, D11, etc.) move.
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# --- STEP 2 (Robust column matching + fallbacks + sanity table) ---
+library(stringr); library(tibble); library(dplyr)
+
+# Expect: labels = as.character(df_raw[1, ]), df_raw[-1, ] is the data body
+stopifnot(exists("labels"), exists("df_raw"))
+
+# Never use the name `data` (it masks base::data)
+df <- df_raw[-1, , drop = FALSE]
+labels <- as.character(labels)
+
+# Guards
+stopifnot(is.data.frame(df))
+stopifnot(length(labels) == ncol(df))
+
+find_by_label <- function(pat, labels, ignore_case = TRUE) {
+  hit <- which(str_detect(labels, regex(pat, ignore_case = ignore_case)))
+  if (length(hit) == 0) return(NA_integer_)
+  hit[1]
+}
+
+# Regex patterns (broad but targeted)
+pat_cc_pct   <- "percent(age)?\\s+of\\s+your\\s+purchases.*past\\s*30\\s*days.*credit\\s*card"
+pat_numcards <- "total\\s+number\\s+of\\s+credit\\s+cards\\s+you\\s+currently\\s+own"
+pat_yob      <- "\\byear\\s+of\\s+birth\\b"
+pat_income   <- "approximate\\s+total\\s+personal\\s+income|considering\\s+all\\s+sources\\s+of\\s+income"
+pat_savings  <- "about\\s+how\\s+much.*savings.*emergency\\s+expenses"
+pat_prime    <- "are\\s+you\\s+currently\\s+subscribed.*amazon\\s*prime"
+
+ix_cc       <- find_by_label(pat_cc_pct, labels)
+ix_cards    <- find_by_label(pat_numcards, labels)
+ix_yob      <- find_by_label(pat_yob, labels)
+ix_income   <- find_by_label(pat_income, labels)
+ix_savings  <- find_by_label(pat_savings, labels)
+ix_prime    <- find_by_label(pat_prime, labels)
+
+# Fallbacks (1-based)
+if (is.na(ix_cc))      ix_cc      <- 21
+if (is.na(ix_cards))   ix_cards   <- 18
+if (is.na(ix_yob))     ix_yob     <- 80
+if (is.na(ix_income))  ix_income  <- 84
+if (is.na(ix_savings)) ix_savings <- 89
+if (is.na(ix_prime))   ix_prime   <- 77
+
+# Bounds check helper
+chk_idx <- function(i, n) {
+  if (!is.numeric(i) || length(i) != 1 || is.na(i) || i < 1 || i > n)
+    stop("Column index out of range: ", i, " (ncol=", n, ")")
+  i
+}
+ix_cc      <- chk_idx(ix_cc,      ncol(df))
+ix_cards   <- chk_idx(ix_cards,   ncol(df))
+ix_yob     <- chk_idx(ix_yob,     ncol(df))
+ix_income  <- chk_idx(ix_income,  ncol(df))
+ix_savings <- chk_idx(ix_savings, ncol(df))
+ix_prime   <- chk_idx(ix_prime,   ncol(df))
+
+# Sanity table
+matched <- tibble::tibble(
+  role    = c("DV: cc_pct","num_cards","year_of_birth","income (text)","savings (text)","Amazon Prime"),
+  index   = c(ix_cc, ix_cards, ix_yob, ix_income, ix_savings, ix_prime),
+  colname = c(names(df)[ix_cc], names(df)[ix_cards], names(df)[ix_yob],
+              names(df)[ix_income], names(df)[ix_savings], names(df)[ix_prime]),
+  label_snippet = substr(labels[c(ix_cc, ix_cards, ix_yob, ix_income, ix_savings, ix_prime)], 1, 75)
+)
+print(matched)
+
+# Quick peek at the first few non-NA values for each matched column
+peek_vals <- function(v) {
+  x <- as.character(v)
+  x <- x[!is.na(x) & nzchar(x)]
+  head(x, 3)
+}
+
+cat("\nSample values (first 3 non-missing):\n")
+cat("  cc_pct   :", paste(peek_vals(df[[ix_cc]]), collapse = " | "), "\n")
+cat("  num_cards:", paste(peek_vals(df[[ix_cards]]), collapse = " | "), "\n")
+cat("  yob      :", paste(peek_vals(df[[ix_yob]]), collapse = " | "), "\n")
+cat("  income   :", paste(peek_vals(df[[ix_income]]), collapse = " | "), "\n")
+cat("  savings  :", paste(peek_vals(df[[ix_savings]]), collapse = " | "), "\n")
+cat("  prime    :", paste(peek_vals(df[[ix_prime]]), collapse = " | "), "\n")
+
+```
+
+# Step 3 – Clean & engineer variables
+in this step three, the code perform the following:
+Convert income/savings brackets → numeric midpoints
+Create Age = 2025 − Year of birth
+Make Prime subscription binary (0/1)
+Convert DV to numeric 0–100
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+to_midpoint <- function(x) {
+  x <- as.character(x)
+  if (length(x) == 0) return(numeric(0))
+  nums <- stringr::str_extract_all(x, "[0-9][0-9,]*")
+  out <- mapply(function(txt, vec) {
+    if (length(vec) == 0) return(NA_real_)
+    vals <- as.numeric(gsub(",", "", vec))
+    txtl <- tolower(txt)
+    if (length(vals) >= 2) {
+      mean(vals[1:2])                             # "Between $25,000 and $49,999"
+    } else if (grepl("less than", txtl)) {
+      vals[1] / 2                                  # "Less than $1,000"
+    } else if (grepl("more than|over|at least|\\+$", txtl)) {
+      vals[1]                                      # "More than $100,000"
+    } else if (grepl("no savings|none|i have no savings", txtl)) {
+      0
+    } else {
+      vals[1]
+    }
+  }, x, nums, USE.NAMES = FALSE)
+  as.numeric(out)
+}
+
+num_safely <- function(x) as.numeric(gsub("[^0-9.\\-]", "", as.character(x)))
+
+# Require DV to be found
+stopifnot(!is.na(ix_cc))
+
+# Small helper: pull a column by its *name* inferred from index
+get_col_by_ix <- function(df, ix) {
+  if (is.na(ix)) return(rep(NA_character_, nrow(df)))
+  df[[ names(df)[ix] ]]
+}
+
+# --- Build raw fields from your matched indices (by *name*, not number) ---
+raw_df <- tibble::tibble(
+  cc_pct_raw   = get_col_by_ix(purchasing_clean, ix_cc),
+  cards_raw    = get_col_by_ix(purchasing_clean, ix_cards),
+  yob_raw      = get_col_by_ix(purchasing_clean, ix_yob),
+  income_txt   = get_col_by_ix(purchasing_clean, ix_income),
+  savings_txt  = get_col_by_ix(purchasing_clean, ix_savings),
+  prime_raw    = get_col_by_ix(purchasing_clean, ix_prime)
+)
+
+# --- Create the analytic dataset used in modeling/plots ---
+analytic <- raw_df %>%
+  dplyr::transmute(
+    cc_pct      = num_safely(cc_pct_raw),                 # DV: 0–100
+    num_cards   = num_safely(cards_raw),
+    yob         = num_safely(yob_raw),
+    age         = dplyr::if_else(!is.na(yob), 2025 - yob, as.numeric(NA)),
+    income_mid  = to_midpoint(income_txt),
+    savings_mid = to_midpoint(savings_txt),
+    prime_sub   = dplyr::case_when(
+      is.na(prime_raw) ~ as.numeric(NA),
+      stringr::str_detect(tolower(as.character(prime_raw)), "yes|selected|amazon|1|true") ~ 1,
+      TRUE ~ 0
+    )
+  )
+
+# --- Replace num_cards parsing with a robust textual parser ---
+if (exists("ix_cards") && !is.na(ix_cards)) {
+  # Use the column you already extracted (avoid the name 'data' entirely)
+  stopifnot(exists("raw_df"))
+  cards_txt <- as.character(raw_df$cards_raw)  # or: as.character(purchasing_clean[[ix_cards]])
+
+  # Normalize
+  cards_low <- tolower(trimws(cards_txt))
+
+  # 1) Extract first digit if present (e.g., "2 cards", "3+")
+  cards_num <- suppressWarnings(as.numeric(stringr::str_extract(cards_low, "\\d+")))
+
+  # 2) Handle common words
+  words_map <- c(
+    "none" = 0, "no" = 0, "zero" = 0,
+    "one" = 1, "two" = 2, "three" = 3, "four" = 4,
+    "five" = 5, "six" = 6, "seven" = 7, "eight" = 8, "nine" = 9
+  )
+
+  need_word <- is.na(cards_num) & nzchar(cards_low)
+  if (any(need_word)) {
+    word_only <- gsub("[^a-z]+", " ", cards_low[need_word])
+    word_only <- trimws(word_only)
+    wnum <- rep(NA_real_, sum(need_word))
+    for (w in names(words_map)) {
+      hit <- grepl(paste0("\\b", w, "\\b"), word_only)
+      wnum[hit] <- words_map[[w]]
+    }
+    cards_num[need_word] <- wnum
+  }
+
+  # 3) Treat "don't have", "not applicable" etc. as 0
+  none_like <- grepl("don'?t.*have|do not.*have|not applicable|n/?a|nil|no card", cards_low)
+  cards_num[is.na(cards_num) & none_like] <- 0
+
+  # 4) Assign back into analytic
+  analytic$num_cards <- cards_num
+} else {
+  analytic$num_cards <- NA_real_
+}
+
+
+# Same summary line you had before
+summary(dplyr::select(analytic, cc_pct, num_cards, age, income_mid, savings_mid, prime_sub))
+
+```
+
+# Handling of missing values per model
+We handled missing value by dropping missing rows per model (not globally), so that each model uses the largest valid of sample:
+Model 1 requires cc_pct and num_cards
+Multiple/Nonlinear require cc_pct, age, num_cards, income_mid, savings_mid, prime_sub
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+m1_df <- analytic %>%
+  select(cc_pct, num_cards) %>%
+  filter(!is.na(cc_pct), !is.na(num_cards))
+
+m2_df <- analytic %>%
+  select(cc_pct, age, num_cards, income_mid, savings_mid, prime_sub) %>%
+  filter(complete.cases(.))
+
+tibble::tibble(
+  frame = c("Model 1 (simple)", "Model 2/3 (multi)"),
+  n = c(nrow(m1_df), nrow(m2_df))
+)
+```
+
+#Diagnostic
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# === DIAGNOSTIC: what do we actually have after Step 3? ===
+diag_counts <- sapply(dplyr::select(
+  analytic, cc_pct, num_cards, age, income_mid, savings_mid, prime_sub
+), function(x) sum(!is.na(x)))
+
+diag_counts  # look here: any zeros?
+
+# Peek first 10 non-missing of each (helps confirm parsing)
+peek <- function(v) head(v[!is.na(v)], 10)
+list(
+  cc_pct     = peek(analytic$cc_pct),
+  num_cards  = peek(analytic$num_cards),
+  age        = peek(analytic$age),
+  income_mid = peek(analytic$income_mid),
+  savings_mid= peek(analytic$savings_mid),
+  prime_sub  = peek(analytic$prime_sub)
+)
+
+```
+
+
+#Step 4 – Exploratory analysis (plots)
+These will help us to support our variable justification and model choice.
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# Recoding cc_pct to 0–100 scale
+m1_df <- m1_df %>%
+  mutate(cc_pct_clean = case_when(
+    cc_pct == 20 ~ 20,
+    cc_pct == 2040 ~ 30,
+    cc_pct == 4060 ~ 50,
+    cc_pct == 6080 ~ 70,
+    cc_pct == 80100 ~ 90,
+    TRUE ~ as.numeric(cc_pct)  # fallback in case
+  ))
+
+# DV vs Number of Credit Cards (using cleaned cc_pct)
+if (nrow(m1_df) > 0) {
+  ggplot(m1_df, aes(x = num_cards, y = cc_pct_clean, color = num_cards)) +
+    geom_point(alpha = 0.6, size = 3) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    labs(title = "DV vs Number of Credit Cards",
+         x = "Number of credit cards",
+         y = "Credit Card Purchase % (past 30 days)") +
+    theme_classic(base_size = 14) +
+    scale_color_viridis_c()
+  
+  
+}
+
+
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+# Recoding cc_pct to 0–100 scale for m2_df
+m2_df <- m2_df %>%
+  mutate(cc_pct_clean = case_when(
+    cc_pct == 20 ~ 20,
+    cc_pct == 2040 ~ 30,
+    cc_pct == 4060 ~ 50,
+    cc_pct == 6080 ~ 70,
+    cc_pct == 80100 ~ 90,
+    TRUE ~ as.numeric(cc_pct)  # fallback in case
+  ))
+
+# DV vs Age (using cleaned cc_pct)
+if (nrow(m2_df) > 0) {
+  ggplot(m2_df, aes(x = age, y = cc_pct_clean, color = age)) +
+    geom_point(alpha = 0.6, size = 3) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    labs(title = "DV vs Age",
+         x = "Age (years)",
+         y = "Credit Card Purchase % (past 30 days)") +
+    theme_classic(base_size = 14) +
+    scale_color_viridis_c(name = "Age")
+  
+  
+}
+
+
+
+```
+
+# DV vs Number of Credit Cards
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+# DV vs Income (Midpoint) --> using cleaned cc_pct
+
+if (nrow(m2_df) > 0) {
+  ggplot(m2_df, aes(x = income_mid, y = cc_pct_clean, color = savings_mid)) +
+    geom_point(alpha = 0.6, size = 3) +
+    geom_smooth(method = "lm", se = FALSE, color = "black") +
+    labs(title = "DV vs Income (midpoint)",
+         x = "Income (approx. midpoint, $)",
+         y = "Credit Card Purchase % (past 30 days)") +
+    theme_classic(base_size = 14) +
+    scale_color_viridis_c(name = "Savings ($)")
+  
+  
+}
+
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+  # Quick correlation look
+  cor_mat <- round(cor(m2_df, use = "pairwise.complete.obs"), 2)
+  cor_mat
+```
+
+# Step 5 Model 1: Simple linear regression
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+m1 <- if (nrow(m1_df) > 1) lm(cc_pct ~ num_cards, data = m1_df) else NULL
+if (!is.null(m1)) {
+  summary(m1)
+}
+
+```
+# Step 6 - Model 2: Multiple linear regression
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+
+m2_linear <- if (nrow(m2_df) > 1) lm(cc_pct ~ age + num_cards + income_mid + savings_mid + prime_sub, data = m2_df) else NULL
+if (!is.null(m2_linear)) {
+  summary(m2_linear)
+}
+
+```
+# Step 7 – Model 3: Nonlinear regression
+Quadratic age (poly(age, 2, raw=TRUE))
+Log transform for skewed savings (log1p(savings_mid))
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+m3_nonlinear <- if (nrow(m2_df) > 1)
+  lm(cc_pct ~ poly(age, 2, raw = TRUE) + num_cards + income_mid + log1p(savings_mid) + prime_sub,
+     data = m2_df) else NULL
+if (!is.null(m3_nonlinear)) {
+  summary(m3_nonlinear)
+}
+```
+
+# Step 8 – Compare models (R² / Adjusted R² / RMSE / MAE)
+This table helps us in picking the best model (usually by Adjusted R² + clean diagnostics).
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+metric_row <- function(name, fit) {
+  if (is.null(fit)) return(NULL)
+  tibble::tibble(
+    Model  = name,
+    R2     = summary(fit)$r.squared,
+    Adj_R2 = summary(fit)$adj.r.squared,
+    RMSE   = sqrt(mean(residuals(fit)^2)),
+    MAE    = mean(abs(residuals(fit)))
+  )
+}
+
+comp <- dplyr::bind_rows(
+  metric_row("M1: cc_pct ~ num_cards", m1),
+  metric_row("M2: Linear", m2_linear),
+  metric_row("M3: Nonlinear (age^2 + log savings)", m3_nonlinear)
+)
+
+comp
+```
+
+#Step 9 – Diagnostics (assumptions)
+Linearity / Normality / Scale-Location / Cook’s: plot(model)
+Homoscedasticity: bptest(model)
+Multicollinearity: vif(model) (multiple models only)
+Outliers: Cook’s distance count
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+diag_plots <- function(fit, title = "") {
+  if (is.null(fit)) return(invisible(NULL))
+  par(mfrow = c(2,2))
+  plot(fit, main = title)  # Residuals vs Fitted, Q-Q, Scale-Location, Cook's
+  par(mfrow = c(1,1))
+
+  cat("\nBreusch-Pagan (homoscedasticity):\n")
+  print(lmtest::bptest(fit))
+
+  if (length(coef(fit)) > 2) {
+    cat("\nVIF (multicollinearity):\n")
+    print(tryCatch(car::vif(fit), error = function(e) "VIF not applicable"))
+  }
+
+  cd <- cooks.distance(fit)
+  thr <- 4/length(cd)
+  cat("\nInfluential obs (Cook's D >", round(thr,4), "):", sum(cd > thr), "\n")
+}
+
+cat("\n--- Diagnostics: Model 2 (Linear) ---\n")
+diag_plots(m2_linear, "M2 Linear")
+
+cat("\n--- Diagnostics: Model 3 (Nonlinear) ---\n")
+diag_plots(m3_nonlinear, "M3 Nonlinear")
+```
+
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+summary(lm(cc_pct ~ num_cards, data = m1_df))
+summary(lm(cc_pct ~ age, data = m2_df))
+summary(lm(cc_pct ~ income_mid, data = m2_df))
+```
+
+# Step 10 – Save cleaned dataset & models (for submission)
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+write_csv(analytic, "assignment2_cleaned.csv")
+
+saveRDS(list(
+  m1 = m1,
+  m2_linear = m2_linear,
+  m3_nonlinear = m3_nonlinear,
+  comparison = comp
+), file = "assignment2_models.rds")
+
+"Saved: assignment2_cleaned.csv and assignment2_models.rds"
+
+```
